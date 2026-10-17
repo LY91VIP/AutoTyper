@@ -1,0 +1,23 @@
+# 示例脚本：在 PyCharm 里按 ↓ 就会一行一行地打出来
+# 按 ↑ 随时停，再按 ↓ 从断点继续
+import random
+
+
+def quicksort(items):
+    if len(items) <= 1:
+        return items
+    pivot = items[len(items) // 2]
+    left = [x for x in items if x < pivot]
+    middle = [x for x in items if x == pivot]
+    right = [x for x in items if x > pivot]
+    return quicksort(left) + middle + quicksort(right)
+
+
+def main():
+    data = [random.randint(0, 100) for _ in range(12)]
+    print("原始数据：", data)
+    print("排序结果：", quicksort(data))
+
+
+if __name__ == "__main__":
+    main()

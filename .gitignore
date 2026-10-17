@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 程序首次运行自动生成的数据
+config.json
+config.json.bak
+state.json
+logs/
+*.log
+
+# 自测 / 构建临时目录
+.selftest-tmp/
+.verify-tmp/
+.build-tmp/
+.build-stage/
+打包输出/
+
+# 打包产物
+*.exe
+*.zip
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
