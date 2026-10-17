@@ -9,6 +9,7 @@
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white">
   <img alt="platform" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?logo=windows&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-22c55e">
+  <img alt="selfcheck" src="https://github.com/LY91VIP/AutoTyper/actions/workflows/selfcheck.yml/badge.svg">
 </p>
 
 <a href="#download">下载安装</a> ·
