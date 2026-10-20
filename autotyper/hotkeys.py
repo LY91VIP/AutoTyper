@@ -37,7 +37,7 @@ HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM,
 
 class GlobalHotkeys:
     def __init__(self, bindings: Dict[str, str], require_modifier: str = "none",
-                 swallow: bool = True, gate: Optional[Callable[[], bool]] = None,
+                 swallow: bool = True, gate: Optional[Callable[[str], bool]] = None,
                  swallow_gate: Optional[Callable[[], bool]] = None,
                  on_action: Optional[Callable[[str], None]] = None,
                  on_unlock: Optional[Callable[[str], None]] = None,
@@ -289,7 +289,9 @@ class GlobalHotkeys:
             return None
         if self._gate is not None:
             try:
-                if not self._gate():
+                # 把动作名一起交给 gate：不同动作的前台窗口要求并不一样
+                # （例如「重置进度」在设置窗口最前面时也必须能用）
+                if not self._gate(action):
                     return None
             except Exception:
                 return None

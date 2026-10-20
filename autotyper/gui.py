@@ -381,7 +381,10 @@ class SettingsWindow:
             self._key_entries[action] = entry
             ttk.Button(row, text="按下新键",
                        command=lambda act=action: self._begin_capture(act)).pack(side="left")
-        ttk.Label(tab, text="「重置进度」键默认不绑定（防止误按），点「按下新键」就能设置。",
+        ttk.Label(tab, justify="left",
+                  text=("「重置进度」键默认不绑定（防止误按），点「按下新键」就能设置。\n"
+                        "「重置进度 / 紧急停止」随时可按（设置窗口在最前面时也能用）；"
+                        "「开始 / 停止」只在别的程序窗口最前面时响应。"),
                   foreground=MUTED).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(tab, text="恢复默认按键", command=self.reset_keys).grid(
             row=6, column=0, sticky="w", pady=(6, 0))

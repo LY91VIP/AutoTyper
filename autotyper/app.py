@@ -190,9 +190,14 @@ class AutoTyperApp:
                 "panic": str(self.cfg.get("hotkeys.panic_key", "f12") or ""),
                 "reset": str(self.cfg.get("hotkeys.reset_key", "") or "")}
 
-    def _hotkey_gate(self) -> bool:
+    def _hotkey_gate(self, action: str = "") -> bool:
         if not bool(self.cfg.get("hotkeys.enabled", True)):
             return False
+        # 「重置进度」「紧急停止」任何时候都要能用：用户往往正是把设置窗口放在最前面
+        # 去按这两个键，而窗口在前台时前台进程就是本程序，原来会被一律拦掉，
+        # 表现出来就是“这个键怎么按都没反应”。这两个键也和“目标程序”无关。
+        if action in ("reset", "panic"):
+            return True
         try:
             if int(foreground_info().get("pid") or 0) == os.getpid():
                 return False
