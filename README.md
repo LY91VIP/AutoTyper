@@ -5,7 +5,7 @@
 **一层一层、像真人一样把文字打出来的 Windows 桌面工具**
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-1.1.0-2563eb">
+  <img alt="version" src="https://img.shields.io/badge/version-1.1.1-2563eb">
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white">
   <img alt="platform" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?logo=windows&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-22c55e">
@@ -92,12 +92,18 @@
 运行自测.bat
 ```
 
-- 离线自测 **115 项**（模拟一个「带退格语义的假编辑器」，逐字符比对最终文本）；
-- 带 Windows 项共 **119 项**（低级键盘钩子、托盘图标、窗口样式、真实 `SendInput` 注入链路等）。
+- 离线自测 **117 项**（模拟一个「带退格语义的假编辑器」，逐字符比对最终文本）；
+- 带 Windows 项共 **121 项**（低级键盘钩子、托盘图标、窗口样式、真实 `SendInput` 注入链路等）。
 
 <a id="changelog"></a>
 
 ## 🆕 更新日志
+
+### v1.1.1（2026-10-20）
+- 修复：在 PyCharm 等「自动缩进 + 自动配对括号」的编辑器里，多行代码打错后回头修正时，
+  换行 / 括号会被卷进退格计划，导致后面的内容整体错位（例如多出一个字母、右括号跑到下一行）；
+- 错字修正现在不会跨换行、制表符、括号引号，也不会把会自动配对的符号当成错字目标；
+- 自测：离线 117 项 / 含 Windows 项 121 项全部通过。
 
 ### v1.1.0（2026-10-20）
 - 新增：③ 页「我的打字习惯」校准——照示例打一段，自动把真实打字节奏套用到速度/拟人参数；
@@ -134,11 +140,11 @@
 
 **不想折腾 Python？** 直接下载打包好的 Windows 版本：
 
-👉 **[Releases · AutoTyper v1.1.0](https://github.com/LY91VIP/AutoTyper/releases)**
+👉 **[Releases · AutoTyper v1.1.1](https://github.com/LY91VIP/AutoTyper/releases)**
 
 | 文件 | 说明 |
 | --- | --- |
-| `AutoTyper_v1.1.0_win64.zip` | Windows 10 / 11 64 位，解压即用，无需安装 Python |
+| `AutoTyper_v1.1.1_win64.zip` | Windows 10 / 11 64 位，解压即用，无需安装 Python |
 
 解压后目录大致是这样：
 
@@ -154,7 +160,7 @@ AutoTyper/
 └─ 使用说明.txt
 ```
 
-> SHA256（v1.1.0）：`8A61DC304471745B03F953F17ED6A980BA60AA7595A3B273B957D28CDFE3398E`
+> SHA256（v1.1.1）：`2C363E5DE053A679C6E9341CF6F344A47E379B97F07FFB073DECDDC0760D2E5D`
 
 <a id="quickstart"></a>
 
