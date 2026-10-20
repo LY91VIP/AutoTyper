@@ -27,6 +27,11 @@ NEIGHBORS: Dict[str, str] = {
 
 LOOKALIKE = {"_": "-", "-": "_", "0": "o", "o": "0", "1": "l", "l": "1", "i": "1"}
 
+# 这些字符在编辑器里会触发自动缩进 / 自动配对，错字计划（先打后删）绝不能碰：
+# 按 Enter 会多出自动缩进、按括号/引号会自动补对，固定次数的退格抵消不了，
+# 会把后面的内容整体打歪（例如代码里出现 “pad_ratiot” + 下一行多出来的 “)”）。
+_PLAN_UNSAFE = set("\r\n\t()[]{}'\"\x60")
+
 
 class Action:
     __slots__ = ("kind", "text", "key", "delay_ms", "progress_index", "plan_id")
@@ -155,6 +160,10 @@ class Humanizer:
         rate = max(0.0, min(1.0, self._num(self.h, "typo_rate", 0.025)))
         if self.rng.random() >= rate:
             return None
+        current = text[index]
+        # 不参与错字模拟：空白（换行/制表符）和会自动配对/缩进的符号
+        if not ch_ok(current) or current in _PLAN_UNSAFE:
+            return None
         transpose_rate = max(0.0, self._num(self.h, "transpose_rate", 0.008))
         double_rate = max(0.0, self._num(self.h, "double_char_rate", 0.006))
         fix_delay = self.rng.randint(
@@ -167,7 +176,8 @@ class Humanizer:
         # 相邻两个字打反
         if subtype < transpose_rate / max(rate, 1e-9) and index + 1 < len(text):
             first, second = text[index], text[index + 1]
-            if ch_ok(first) and ch_ok(second):
+            if ch_ok(first) and ch_ok(second) and first not in _PLAN_UNSAFE \
+                    and second not in _PLAN_UNSAFE:
                 plan = [Action("text", rhythm.next_delay(), text=second),
                         Action("text", rhythm.next_delay(), text=first)]
                 if skip_fix:
@@ -196,13 +206,15 @@ class Humanizer:
         if (not skip_fix) and index + 1 < len(text) and self.rng.random() < late_rate:
             extra = self.rng.randint(0, max(0, int(self._num(self.h, "late_notice_extra_max", 3))))
             extra = min(extra, len(text) - index - 1)
+            # 先打后改的“多打几个字”必须停在同一行的安全字符内：
+            # 跨过换行/制表符/自动配对符号会让退格次数和编辑器实际插入的字符数对不上
+            safe = 0
+            while safe < extra and text[index + 1 + safe] not in _PLAN_UNSAFE:
+                safe += 1
+            extra = safe
         plan: List[Action] = [Action("text", rhythm.next_delay(), text=wrong)]
         for offset in range(1, extra + 1):
-            nxt = text[index + offset]
-            if nxt == "\n":
-                plan.append(Action("key", rhythm.next_delay(), key="enter"))
-            elif nxt != "\r":
-                plan.append(Action("text", rhythm.next_delay(), text=nxt))
+            plan.append(Action("text", rhythm.next_delay(), text=text[index + offset]))
         if skip_fix:
             return plan, index + extra + 1
         plan.append(Action("wait", fix_delay))
@@ -211,17 +223,20 @@ class Humanizer:
         return plan, index
 
     def _wrong_char(self, ch: str) -> str:
-        if not ch_ok(ch):
+        if not ch_ok(ch) or ch in _PLAN_UNSAFE:
             return ""
         neighbor_ratio = max(0.0, min(1.0, self._num(self.h, "neighbor_typo_ratio", 0.8)))
         lowered = ch.lower()
         if self.rng.random() < neighbor_ratio:
-            pool = NEIGHBORS.get(lowered, "")
+            # 邻键里可能有 ] ' " 这类会触发编辑器自动配对的字符，先过滤掉
+            pool = [item for item in NEIGHBORS.get(lowered, "") if item not in _PLAN_UNSAFE]
             if pool:
                 picked = self.rng.choice(pool)
                 return picked.upper() if ch.isupper() else picked
         if lowered in LOOKALIKE and self.rng.random() < 0.4:
-            return LOOKALIKE[lowered]
+            picked = LOOKALIKE[lowered]
+            if picked not in _PLAN_UNSAFE:
+                return picked
         candidates = "abcdefghijklmnopqrstuvwxyz0123456789"
         picked = self.rng.choice(candidates)
         return picked.upper() if ch.isupper() else picked

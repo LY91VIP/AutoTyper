@@ -92,6 +92,51 @@ class DocSink:
             return "".join(self.parts)
 
 
+class AutoIndentPairSink:
+    """模拟 PyCharm 一类编辑器：Enter 自动缩进、括号/引号自动配对。
+
+    用来验证“多行文本 + 打错后回头改”不会把行/缩进/括号搞乱。
+    """
+
+    name = "auto-indent"
+    PAIRS = {"(": ")", "[": "]", "{": "}", "'": "'", '"': '"'}
+
+    def __init__(self, initial: str = "    ", indent: str = "    ") -> None:
+        self.buffer = list(initial)
+        self.cursor = len(self.buffer)
+        self.indent = indent
+
+    def type_text(self, text: str) -> None:
+        for ch in text:
+            if ch in self.PAIRS:
+                # 编辑器自动补一个右半边，光标停在中间
+                self.buffer.insert(self.cursor, ch)
+                self.cursor += 1
+                self.buffer.insert(self.cursor, self.PAIRS[ch])
+            elif self.cursor < len(self.buffer) and self.buffer[self.cursor] == ch:
+                # 打到自动补出来的右半边 → 直接跨过去
+                self.cursor += 1
+            else:
+                self.buffer.insert(self.cursor, ch)
+                self.cursor += 1
+
+    def press_key(self, key: str) -> None:
+        key = str(key).lower()
+        if key in ("enter", "return"):
+            self.buffer.insert(self.cursor, "\n")
+            self.cursor += 1
+            for ch in self.indent:
+                self.buffer.insert(self.cursor, ch)
+                self.cursor += 1
+        elif key in ("backspace", "back"):
+            if self.cursor > 0:
+                self.cursor -= 1
+                del self.buffer[self.cursor]
+
+    def text(self) -> str:
+        return "".join(self.buffer)
+
+
 # --------------------------------------------------------------------- 工具
 # 放在程序目录内，并且用 os.makedirs 而不是 tempfile.mkdtemp：
 # mkdtemp 会创建“保护性 ACL”的目录，导致受限沙箱下无法往里写文件。
@@ -181,6 +226,48 @@ def test_humanizer() -> None:
     indexes = [a.progress_index for a in actions]
     check("拟人化：进度下标单调不减", all(b >= a for a, b in zip(indexes, indexes[1:])))
     check("拟人化：进度不超过文本长度", max(indexes) <= len(text), str(max(indexes)))
+
+
+def test_humanizer_multiline_editor() -> None:
+    """多行文本 + 自动缩进/自动配对编辑器：错字修正不能把结构打歪。"""
+    import random
+    original = ("    pad_x = int((x2 - x1) * pad_ratio)\n"
+                "    pad_y = int((y2 - y1) * pad_ratio)\n")
+    stripped = apply_indent(original, "strip")
+    timing = {"char_delay_ms": 1, "burst_mode": False, "newline_pause_ms": 0,
+              "punctuation_pause_ms": 0, "space_pause_ms": 0,
+              "thinking_pause_chance": 0, "char_delay_jitter_pct": 0}
+    human = {"typo_rate": 1.0, "transpose_rate": 0.02, "double_char_rate": 0.02,
+             "late_notice_rate": 1.0, "late_notice_extra_max": 3,
+             "fix_delay_min_ms": 0, "fix_delay_max_ms": 0, "neighbor_typo_ratio": 1.0}
+    unsafe = set("\r\n\t()[]{}'\"\x60")
+    bad_actions = []
+    rounds = 12
+    for seed in range(rounds):
+        actions = list(Humanizer(timing, human, rng=random.Random(seed)).actions(stripped, "enter"))
+        for action in actions:
+            if action.plan_id is None:
+                continue
+            if action.kind == "key" and action.key == "enter":
+                bad_actions.append("enter")
+            if action.kind == "text" and any(ch in unsafe for ch in action.text):
+                bad_actions.append("unsafe-text")
+        sink = AutoIndentPairSink()
+        for action in actions:
+            if action.kind == "text":
+                sink.type_text(action.text)
+            elif action.kind == "key":
+                sink.press_key(action.key)
+        got_lines = [line.rstrip(" \t") for line in sink.text().split("\n")]
+        want_lines = [line.rstrip(" \t") for line in original.split("\n")]
+        if got_lines != want_lines:
+            bad_actions.append("第 %d 轮内容不一致：%r" % (seed + 1, sink.text()[:80]))
+            break
+    check("拟人化：多行错字修正不会按 Enter/括号/引号", not bad_actions,
+          bad_actions[0] if bad_actions else "")
+    check("拟人化：自动缩进+自动配对编辑器里多行内容仍完全正确",
+          not any(item.startswith("第 ") for item in bad_actions),
+          bad_actions[0] if bad_actions else "%d 轮全部一致" % rounds)
 
 
 def test_habits_calibration() -> None:
@@ -842,6 +929,7 @@ def run_all(with_windows: bool = False) -> int:
     test_segments()
     test_indent()
     test_humanizer()
+    test_humanizer_multiline_editor()
     test_habits_calibration()
     test_engine_full_run()
     test_engine_stop_and_resume()
