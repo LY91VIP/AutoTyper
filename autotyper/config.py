@@ -60,6 +60,7 @@ DEFAULTS: Dict[str, Any] = {
         "start_key": "down",
         "stop_key": "up",
         "panic_key": "f12",
+        "reset_key": "",          # 重置进度键：默认不绑定，防止误按
         "require_modifier": "none",
         "swallow_keys": True,
         "swallow_mode": "target",
@@ -96,6 +97,17 @@ DEFAULTS: Dict[str, Any] = {
     "app_profiles": {},
     # 界面上的小偏好（比如楼层框拉多大）
     "ui": {"paned_ratio": 0.42},
+    # ③ 页“我的打字习惯”最近一次校准结果（由界面写入，供状态行显示/回填）
+    "habits": {
+        "calibrated_at": "",
+        "sample_chars": 0,
+        "sample_seconds": 0.0,
+        "median_interval_ms": 0,
+        "jitter_pct": 0,
+        "chars_per_minute": 0,
+        "typo_rate": 0.0,
+        "applied": {},
+    },
 }
 
 _TRUE = ("1", "true", "yes", "on", "是", "开")

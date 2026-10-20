@@ -187,7 +187,8 @@ class AutoTyperApp:
     def _binding_map(self) -> dict:
         return {"start": str(self.cfg.get("hotkeys.start_key", "down") or ""),
                 "stop": str(self.cfg.get("hotkeys.stop_key", "up") or ""),
-                "panic": str(self.cfg.get("hotkeys.panic_key", "f12") or "")}
+                "panic": str(self.cfg.get("hotkeys.panic_key", "f12") or ""),
+                "reset": str(self.cfg.get("hotkeys.reset_key", "") or "")}
 
     def _hotkey_gate(self) -> bool:
         if not bool(self.cfg.get("hotkeys.enabled", True)):
@@ -248,6 +249,12 @@ class AutoTyperApp:
         self._start_hotkeys()
 
     def apply_hotkeys_live(self) -> None:
+        # 界面改键后可能还没触发自动保存，这里先收一遍，避免用旧键重启钩子
+        try:
+            if self.settings is not None:
+                self.settings.collect_hotkeys()
+        except Exception:
+            pass
         self.cfg.save()
         self._restart_hotkeys()
         try:

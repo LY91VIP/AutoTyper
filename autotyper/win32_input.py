@@ -232,6 +232,9 @@ _VK_TO_LABEL = {
 }
 for _i in range(1, 25):
     _VK_TO_LABEL[0x6F + _i] = "F%d" % _i
+# 符号键也给出正常显示名（改键时提示不会显示成 VK_0xBB）
+_VK_TO_LABEL.update({0xBC: ",", 0xBE: ".", 0xBF: "/", 0xBA: ";", 0xDE: "'",
+                     0xDB: "[", 0xDD: "]", 0xDC: "\\", 0xBD: "-", 0xBB: "="})
 
 
 def name_to_vk(name: str) -> int:

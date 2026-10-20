@@ -4,7 +4,8 @@
 界面不参与打字，但它是用户配置一切的唯一入口，所以单独验证：
   * 楼层的新增/删除/移动/内容保存，最终能不能正确写进配置；
   * 百分比字段（错字率 2.5% ↔ 0.025）来回转换是否正确；
-  * 改键之后旧键位是不是真的没了（这是用户明确提出的要求）。
+  * 改键之后旧键位是不是真的没了（这是用户明确提出的要求）；
+  * ③ 页的“用户打字习惯校准”：采集/分析/套用能不能真的改对参数、刷新状态。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ PROGRAM_DIR = os.path.dirname(HERE)
 if PROGRAM_DIR not in sys.path:
     sys.path.insert(0, PROGRAM_DIR)
 
+from autotyper import habits  # noqa: E402
 from autotyper import paths  # noqa: E402
 from autotyper.config import Config  # noqa: E402
 from autotyper.engine import TypingEngine  # noqa: E402
@@ -43,7 +45,7 @@ class FakeHotkeys:
 
     def __init__(self):
         self.running = True
-        self.table = {"start": "down", "stop": "up", "panic": "f12"}
+        self.table = {"start": "down", "stop": "up", "panic": "f12", "reset": ""}
 
     def label_for(self, action):
         return self.table.get(action, "")
@@ -69,6 +71,7 @@ class FakeApp:
             "start": str(self.cfg.get("hotkeys.start_key") or ""),
             "stop": str(self.cfg.get("hotkeys.stop_key") or ""),
             "panic": str(self.cfg.get("hotkeys.panic_key") or ""),
+            "reset": str(self.cfg.get("hotkeys.reset_key") or ""),
         }
         if getattr(self, "settings", None) is not None:
             self.settings.refresh_hotkey_live()
@@ -89,7 +92,30 @@ class FakeApp:
         pass
 
 
+class FakeAppNoCollect(FakeApp):
+    """模拟真实 AutoTyperApp：apply_hotkeys_live 不会再替界面 collect（历史 bug 场景）。"""
+
+    def apply_hotkeys_live(self):
+        self.live_calls += 1
+        self.hotkeys.table = {
+            "start": str(self.cfg.get("hotkeys.start_key") or ""),
+            "stop": str(self.cfg.get("hotkeys.stop_key") or ""),
+            "panic": str(self.cfg.get("hotkeys.panic_key") or ""),
+            "reset": str(self.cfg.get("hotkeys.reset_key") or ""),
+        }
+        if getattr(self, "settings", None) is not None:
+            self.settings.refresh_hotkey_live()
+
+
 def main() -> int:
+    # 输出被管道/重定向接管时，Windows 上的 Python 默认按 GBK 编码，
+    # 打印 ⏎ 这类符号会 UnicodeEncodeError；改成 UTF-8 输出（控制台直跑不受影响）。
+    try:
+        if not sys.stdout.isatty():
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     os.makedirs(TMP, exist_ok=True)
     cfg = Config({}, os.path.join(TMP, "gui-config.json"))
     app = FakeApp(cfg)
@@ -99,7 +125,8 @@ def main() -> int:
     app.settings = window
     app.hotkeys.table = {"start": str(cfg.get("hotkeys.start_key")),
                          "stop": str(cfg.get("hotkeys.stop_key")),
-                         "panic": str(cfg.get("hotkeys.panic_key"))}
+                         "panic": str(cfg.get("hotkeys.panic_key")),
+                         "reset": str(cfg.get("hotkeys.reset_key"))}
 
     # ---- 显示是否正常（曾被裁字）----
     style = ttk.Style()
@@ -191,9 +218,10 @@ def main() -> int:
           str(cfg.get("timing.char_delay_ms")))
 
     # ---- 改键（重点）----
-    check("改键：默认是 ↓ / ↑ / F12",
+    check("改键：默认是 ↓ / ↑ / F12 / 重置未设置",
           window._binding_vars["start"].get() == "down" and window._binding_vars["stop"].get() == "up"
-          and window._binding_vars["panic"].get() == "f12")
+          and window._binding_vars["panic"].get() == "f12"
+          and window._binding_vars["reset"].get() == "")
     window._set_binding("start", "f8")
     check("改键：开始键变成 F8", window._binding_vars["start"].get() == "f8")
     check("改键：立刻重新注册了热键", app.live_calls == 1, str(app.live_calls))
@@ -213,8 +241,130 @@ def main() -> int:
     window.reset_keys()
     check("改键：恢复默认按键", window._binding_vars["start"].get() == "down"
           and window._binding_vars["stop"].get() == "up"
-          and window._binding_vars["panic"].get() == "f12")
+          and window._binding_vars["panic"].get() == "f12"
+          and window._binding_vars["reset"].get() == "")
     check("改键：恢复默认后立刻生效", app.hotkeys.table["start"] == "down", str(app.hotkeys.table))
+
+    # ---- 重置进度热键 ----
+    window._set_binding("reset", "f9")
+    check("重置键：能改成 F9", window._binding_vars["reset"].get() == "f9",
+          window._binding_vars["reset"].get())
+    check("重置键：立刻写回配置", str(cfg.get("hotkeys.reset_key")) == "f9",
+          str(cfg.get("hotkeys.reset_key")))
+    check("重置键：生效表里出现", app.hotkeys.table.get("reset") == "f9",
+          str(app.hotkeys.table))
+    window.reset_keys()
+
+    # ---- 改键：真实捕获路径（旧版点“按下新键”后焦点在按钮上，永远收不到按键）----
+    # 说明：Tk 在窗口不可见时 event_generate 的键盘事件不会派发，所以这里临时显示窗口，
+    # 模拟用户真实操作（真实使用时窗口本来就是可见的）。
+    try:
+        window.root.deiconify()
+        window.root.update()
+    except Exception:
+        pass
+    window._begin_capture("start")
+    check("改键：点“按下新键”后进入捕获状态", window._capture_action == "start",
+          str(window._capture_action))
+    check("改键：捕获期间窗口级监听已挂上", bool(window.root.bind("<KeyPress>")),
+          str(bool(window.root.bind("<KeyPress>"))))
+    window.root.event_generate("<KeyPress>", keysym="Shift_L")
+    window.root.update()
+    check("改键：先按到 Shift 不结束捕获", window._capture_action == "start",
+          str(window._capture_action))
+    window.root.event_generate("<KeyPress>", keysym="F8")
+    window.root.update()
+    check("改键：焦点不在输入框上也能识别按下的新键",
+          window._binding_vars["start"].get() == "f8", window._binding_vars["start"].get())
+    check("改键：捕获结束后自动退出捕获状态", window._capture_action is None,
+          str(window._capture_action))
+    check("改键：捕获结束后窗口级监听已移除", not window.root.bind("<KeyPress>"))
+    check("改键：新键立刻写回配置文件", str(cfg.get("hotkeys.start_key")) == "f8",
+          str(cfg.get("hotkeys.start_key")))
+    check("改键：生效表也换成新键", app.hotkeys.table["start"] == "f8", str(app.hotkeys.table))
+    window.root.event_generate("<KeyPress>", keysym="F9")
+    window.root.update()
+    check("改键：捕获结束后再按键不会误改", window._binding_vars["start"].get() == "f8",
+          window._binding_vars["start"].get())
+
+    window._begin_capture("panic")
+    window.root.event_generate("<KeyPress>", keysym="comma")
+    window.root.update()
+    check("改键：逗号这类符号键也能识别", window._binding_vars["panic"].get() == ",",
+          window._binding_vars["panic"].get())
+    check("改键：符号键显示名正常", pretty_key(",") == ",", pretty_key(","))
+    window.reset_keys()
+
+    window._begin_capture("stop")
+    window.root.event_generate("<KeyPress>", keysym="Escape")
+    window.root.update()
+    check("改键：Esc 取消捕获且不改键",
+          window._capture_action is None and window._binding_vars["stop"].get() == "up",
+          "%s / %s" % (window._capture_action, window._binding_vars["stop"].get()))
+    window.reset_keys()
+
+    window._begin_capture("reset")
+    window.root.event_generate("<KeyPress>", keysym="F9")
+    window.root.update()
+    check("重置键：也能用「按下新键」捕获", window._binding_vars["reset"].get() == "f9",
+          window._binding_vars["reset"].get())
+    check("重置键：捕获后立刻写回配置", str(cfg.get("hotkeys.reset_key")) == "f9",
+          str(cfg.get("hotkeys.reset_key")))
+    window.reset_keys()
+    try:
+        window.root.withdraw()
+        window.root.update()
+    except Exception:
+        pass
+
+    # ---- 改键：真实 app 的 apply 不 collect 时也不会“假生效”----
+    root2 = tk.Tk()
+    root2.withdraw()
+    cfg2 = Config({}, os.path.join(TMP, "gui-config-nocollect.json"))
+    app2 = FakeAppNoCollect(cfg2)
+    window2 = SettingsWindow(app2, root2)
+    app2.settings = window2
+    window2._set_binding("start", "f8")
+    check("改键：真实 app 不替界面 collect 时也真正生效",
+          str(cfg2.get("hotkeys.start_key")) == "f8" and app2.hotkeys.table["start"] == "f8",
+          "%r / %r" % (cfg2.get("hotkeys.start_key"), app2.hotkeys.table))
+    root2.destroy()
+
+    # ---- 保存 / 载入本地演示 ----
+    demo_path = os.path.join(TMP, "local-demo.demo.json")
+    demo_count = window._write_demo_file(demo_path)
+    demo_data = _json.load(open(demo_path, encoding="utf-8"))
+    check("保存演示：文件写出成功",
+          demo_count == len(window.steps) and os.path.exists(demo_path), str(demo_count))
+    check("保存演示：文件头与楼层齐全", demo_data.get("kind") == "autotyper-demo"
+          and demo_data.get("app") == "打字助手"
+          and isinstance(demo_data.get("steps"), list)
+          and len(demo_data["steps"]) == demo_count, str(demo_data.get("kind")))
+    check("保存演示：界面按钮存在", bool(getattr(window, "save_demo_button", None))
+          and bool(getattr(window, "load_demo_button", None)))
+    original_steps = [dict(item) for item in window.steps]
+    window._load_demo_steps([{"name": "临时一层", "text": "x = 1"}])
+    check("载入演示：临时内容确实被替换", len(window.steps) == 1, str(len(window.steps)))
+    loaded_steps = window._read_demo_file(demo_path)
+    window._load_demo_steps(loaded_steps)
+    check("载入演示：楼层完全还原", window.steps == original_steps,
+          str([s.get("name") for s in window.steps]))
+    check("载入演示：配置与引擎同步", len(cfg.steps()) == len(original_steps)
+          and len(app.engine.step_summaries()) == len(original_steps),
+          "%d / %d" % (len(cfg.steps()), len(app.engine.step_summaries())))
+    bad_path = os.path.join(TMP, "bad-demo.json")
+    with open(bad_path, "w", encoding="utf-8") as handle:
+        handle.write('{"foo": 1}')
+    try:
+        window._read_demo_file(bad_path)
+        bad_ok = False
+    except ValueError:
+        bad_ok = True
+    check("载入演示：坏文件给出明确错误", bad_ok)
+    plain_path = os.path.join(TMP, "plain-list-demo.json")
+    with open(plain_path, "w", encoding="utf-8") as handle:
+        handle.write('["print(1)", "print(2)"]')
+    check("载入演示：兼容纯字符串列表", len(window._read_demo_file(plain_path)) == 2)
 
     # ---- 状态显示 ----
     window.on_status({"state_label": "待命", "segment": 2, "segments": 3, "step_name": "第二层",
@@ -275,6 +425,90 @@ def main() -> int:
     check("演示：演示窗口能打开", getattr(window, "_demo_window", None) is not None)
     window._close_demo()
     check("演示：关闭后清理干净", getattr(window, "_demo_window", None) is None)
+
+    # ---- ③ 页：用户打字习惯校准（自动适配速度/拟人参数）----
+    status_var = getattr(window, "habits_status_var", None)
+    check("习惯：③ 页有“我的打字习惯”状态行", status_var is not None)
+    initial_state = status_var.get() if status_var is not None else ""
+    check("习惯：初始状态显示“还没校准”", "还没校准" in initial_state, initial_state)
+
+    # 造一组“像真人”的按键事件：英文 + 空格/标点/换行 + 两次退格改错
+    sample_text = ("The quick brown fox jumps over the lazy dog.\n"
+                   "It writes code: def f(x): return x + 1, then # done.\n"
+                   'print("hello, world"); # comment')
+    events = []
+    clock = [1000.0]
+    rhythm = [55, 62, 70, 78, 85, 92, 100, 110]
+    punctuations = ",.;:!?，。；：！？"
+
+    def record_one(char, keysym, delay):
+        clock[0] += float(delay)
+        events.append({"t": clock[0], "char": char, "keysym": keysym})
+
+    for index, char in enumerate(sample_text):
+        if char == "\n":
+            record_one("\r", "Return", 480)
+        elif char == " ":
+            record_one(" ", "space", 190)
+        elif char in punctuations:
+            record_one(char, char, 240)
+        else:
+            record_one(char, char, rhythm[index % len(rhythm)])
+        if index in (18, 47):   # 打错两个字，当场退格改回来
+            record_one("", "BackSpace", 45 + index % 17)
+            record_one("", "BackSpace", 38 + index % 13)
+
+    profile = habits.analyze_events(events)
+    check("习惯：合成按键事件能算出 profile",
+          isinstance(profile, dict) and int(profile.get("sample_chars") or 0) >= 40,
+          "样本 %s 字" % (profile.get("sample_chars") if isinstance(profile, dict) else profile))
+    expected = habits.suggest(profile, dict(cfg.section("timing")), dict(cfg.section("human")))
+    check("习惯：能给出建议参数（含每字间隔）", "timing.char_delay_ms" in expected,
+          str(sorted(expected)))
+    window._apply_habits_profile(profile)
+    check("习惯：套用后每字间隔等于建议值",
+          int(cfg.get("timing.char_delay_ms")) == int(expected["timing.char_delay_ms"]),
+          "%s vs %s" % (cfg.get("timing.char_delay_ms"), expected.get("timing.char_delay_ms")))
+    check("习惯：套用后抖动等于建议值",
+          int(cfg.get("timing.char_delay_jitter_pct")) == int(expected["timing.char_delay_jitter_pct"]),
+          "%s vs %s" % (cfg.get("timing.char_delay_jitter_pct"),
+                        expected.get("timing.char_delay_jitter_pct")))
+    check("习惯：套用后快慢交替开关同步",
+          bool(cfg.get("timing.burst_mode")) == bool(expected.get("timing.burst_mode", True)),
+          str(cfg.get("timing.burst_mode")))
+    calibrated_at = str(cfg.get("habits.calibrated_at") or "").strip()
+    check("习惯：套用后写入校准时间", bool(calibrated_at), calibrated_at)
+    check("习惯：套用的参数记录进配置",
+          isinstance(cfg.get("habits.applied"), dict) and bool(cfg.get("habits.applied")),
+          str(cfg.get("habits.applied")))
+    applied_state = window.habits_status_var.get()
+    check("习惯：状态行变成“已校准”", "已校准" in applied_state, applied_state)
+    check("习惯：状态行带中位间隔与字/分",
+          "中位间隔" in applied_state and "字/分" in applied_state, applied_state)
+    if "human.typo_rate" in expected:
+        typo_gui_var = window._vars[("human.typo_rate", "float")]
+        want_typo = round(float(expected["human.typo_rate"]) * 100.0, 3)
+        got_typo = float(typo_gui_var.get())
+        check("习惯：错字率百分比变量同步（×100）", abs(got_typo - want_typo) < 0.001,
+              "界面=%s 期望=%s 配置=%s" % (got_typo, want_typo, cfg.get("human.typo_rate")))
+    else:
+        check("习惯：错字率百分比变量同步（×100）", False, "suggest 没有返回 human.typo_rate")
+
+    # ---- 采集对话框：能打开、有输入框、关闭后清理干净（不触发“完成并套用”弹窗）----
+    window._open_habits()
+    window.root.update()
+    habit_dialog = getattr(window, "_habit_window", None)
+    habit_input = getattr(window, "_habit_input", None)
+    check("习惯：采集对话框能打开",
+          habit_dialog is not None and bool(habit_dialog.winfo_exists()))
+    check("习惯：对话框里有可输入的打字区",
+          habit_input is not None and bool(habit_input.winfo_exists()))
+    check("习惯：对话框里显示实时统计行",
+          bool(getattr(window, "_habit_status_var", None))
+          and bool(window._habit_status_var.get()))
+    window._close_habits()
+    check("习惯：关闭对话框后清理干净（_habit_window 为 None）",
+          getattr(window, "_habit_window", None) is None)
 
     root.destroy()
     failed = [name for name, ok in RESULTS if not ok]

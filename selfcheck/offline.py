@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import shutil
 import sys
@@ -28,6 +29,8 @@ from autotyper import paths  # noqa: E402
 from autotyper.config import Config  # noqa: E402
 from autotyper.engine import (TypingEngine, apply_indent, build_segments,  # noqa: E402
                               build_steps_layout, resolve_indent_mode, segment_end_for)
+from autotyper.habits import (MIN_INTERVALS, SAMPLE_TEXT, HabitError, HabitProfiler,  # noqa: E402
+                              analyze_events, classify_key, profile_to_config, suggest, summarize)
 from autotyper.humanizer import Humanizer  # noqa: E402
 
 RESULTS: list = []
@@ -180,6 +183,215 @@ def test_humanizer() -> None:
     check("拟人化：进度不超过文本长度", max(indexes) <= len(text), str(max(indexes)))
 
 
+def test_habits_calibration() -> None:
+    """用户打字习惯校准：统计口径、suggest 映射/clamp、样本不足报错都要稳。"""
+    # ---------------------------------------------------------- 按键分类
+    check("习惯：BackSpace 归类为退格", classify_key("", "BackSpace") == "backspace")
+    check("习惯：Return / KP_Enter 归类为回车",
+          classify_key("\r", "Return") == "enter" and classify_key("", "KP_Enter") == "enter")
+    check("习惯：空格单独分类", classify_key(" ") == "space")
+    check("习惯：英文与中文标点都算标点",
+          classify_key(",") == "punct" and classify_key("。") == "punct"
+          and classify_key("！") == "punct")
+    check("习惯：普通字符（含中文）算字符",
+          classify_key("a") == "char" and classify_key("中") == "char")
+    check("习惯：换行/制表/功能键/多字符不参与统计",
+          classify_key("\n") == "" and classify_key("\t") == ""
+          and classify_key("", "Shift_L") == "" and classify_key("ab") == "")
+
+    # ---------------------------------------------------------- 采集样例
+    check("习惯：采集样例长度合适、符号齐全",
+          100 <= len(SAMPLE_TEXT) <= 130 and " " in SAMPLE_TEXT and "," in SAMPLE_TEXT
+          and "." in SAMPLE_TEXT and "\n" in SAMPLE_TEXT and "(" in SAMPLE_TEXT
+          and "\"" in SAMPLE_TEXT,
+          "长度 %d" % len(SAMPLE_TEXT))
+
+    # ---------------------------------------------------------- 纯节奏样本
+    # 20 个间隔严格按 60/120 交替：中位 90、p10=60、p90=120、抖动 67%、字速 667
+    rhythm_events = [{"t": 1000.0, "char": "a"}]
+    moment = 1000.0
+    for index in range(20):
+        moment += 60.0 if index % 2 == 0 else 120.0
+        rhythm_events.append({"t": moment, "char": "a"})
+    profiler = HabitProfiler()
+    for item in rhythm_events:
+        profiler.record(item["t"], char=item["char"])
+    check("习惯：字符数 / 有效间隔数统计正确",
+          profiler.char_count == 21 and profiler.interval_count == 20,
+          "%d 字 / %d 间隔" % (profiler.char_count, profiler.interval_count))
+    profile = analyze_events(rhythm_events)
+    check("习惯：profile 键与契约一致（14 项，note 为字符串）",
+          set(profile) == {"sample_chars", "sample_seconds", "median_interval_ms",
+                           "p10_interval_ms", "p90_interval_ms", "jitter_pct",
+                           "chars_per_minute", "backspace_count", "typo_rate",
+                           "space_pause_ms", "punctuation_pause_ms", "newline_pause_ms",
+                           "fix_delay_ms", "note"} and isinstance(profile["note"], str))
+    check("习惯：中位 / 分位间隔统计正确",
+          profile["median_interval_ms"] == 90 and profile["p10_interval_ms"] == 60
+          and profile["p90_interval_ms"] == 120,
+          "%s / %s / %s" % (profile["median_interval_ms"], profile["p10_interval_ms"],
+                            profile["p90_interval_ms"]))
+    check("习惯：抖动 / 字速 / 时长 / 字数统计正确",
+          profile["jitter_pct"] == 67 and profile["chars_per_minute"] == 667
+          and profile["sample_seconds"] == 1.8 and profile["sample_chars"] == 21,
+          "%s%% / %s 字每分 / %ss" % (profile["jitter_pct"], profile["chars_per_minute"],
+                                      profile["sample_seconds"]))
+    check("习惯：没有空格/标点/换行/退格样本时对应项为 None",
+          profile["space_pause_ms"] is None and profile["punctuation_pause_ms"] is None
+          and profile["newline_pause_ms"] is None and profile["fix_delay_ms"] is None)
+    check("习惯：summarize 含中位间隔/字速/抖动/样本/退格",
+          summarize(profile) == "中位间隔 90 ms · 约 667 字/分 · 抖动 67% · 样本 21 字 · 退格 0 次",
+          summarize(profile))
+    check("习惯：HabitProfiler.analyze() 无参调用可用于界面",
+          profiler.analyze()["median_interval_ms"] == 90
+          and profiler.analyze({"char_delay_ms": 55}, {"typo_rate": 0.02})["median_interval_ms"] == 90)
+
+    plain_suggest = suggest(profile, {}, {})
+    check("习惯：suggest 基础节奏映射正确",
+          plain_suggest == {"timing.char_delay_ms": 90,
+                            "timing.char_delay_jitter_pct": 67,
+                            "timing.burst_mode": True,
+                            "timing.burst_fast_ms": 60,
+                            "timing.burst_slow_ms": 120},
+          str(plain_suggest))
+    check("习惯：样本不足时不返回暂停 / 错字 / 改错参数",
+          "timing.space_pause_ms" not in plain_suggest
+          and "timing.punctuation_pause_ms" not in plain_suggest
+          and "timing.newline_pause_ms" not in plain_suggest
+          and "human.typo_rate" not in plain_suggest
+          and "human.fix_delay_min_ms" not in plain_suggest)
+    plain_config = profile_to_config(profile)
+    check("习惯：profile_to_config 只输出 JSON 安全数值字段",
+          plain_config == {"sample_chars": 21, "sample_seconds": 1.8,
+                           "median_interval_ms": 90, "jitter_pct": 67,
+                           "chars_per_minute": 667, "typo_rate": 0.0}
+          and json.loads(json.dumps(plain_config)) == plain_config,
+          str(plain_config))
+
+    # ---------------------------------------------------------- 混合样本
+    # 40 字（间隔 60/120 交替）+ 4 空格（各 +170ms）+ 4 标点（各 +270ms）
+    # + 2 回车（各 +470ms）+ 2 次退格（间隔 150ms）
+    mixed_events = [{"t": 1000.0, "kind": "char"}]
+    moment = 1000.0
+    for index in range(39):
+        moment += 60.0 if index % 2 == 0 else 120.0
+        mixed_events.append({"t": moment, "kind": "char"})
+    for _ in range(4):
+        moment += 290.0
+        mixed_events.append({"t": moment, "kind": "space"})
+    for _ in range(4):
+        moment += 390.0
+        mixed_events.append({"t": moment, "kind": "punct"})
+    for _ in range(2):
+        moment += 590.0
+        mixed_events.append({"t": moment, "kind": "enter"})
+    moment += 200.0
+    mixed_events.append({"t": moment, "kind": "backspace"})
+    moment += 150.0
+    mixed_events.append({"t": moment, "kind": "backspace"})
+
+    mixed = analyze_events(mixed_events)
+    check("习惯：混合样本的字数 / 退格数正确",
+          mixed["sample_chars"] == 48 and mixed["backspace_count"] == 2,
+          "%d 字 / %d 退格" % (mixed["sample_chars"], mixed["backspace_count"]))
+    check("习惯：混合样本的中位/分位/抖动/字速正确",
+          mixed["median_interval_ms"] == 120 and mixed["p10_interval_ms"] == 60
+          and mixed["p90_interval_ms"] == 290 and mixed["jitter_pct"] == 192
+          and mixed["chars_per_minute"] == 500,
+          "%s / %s / %s / %s%% / %s 字每分"
+          % (mixed["median_interval_ms"], mixed["p10_interval_ms"],
+             mixed["p90_interval_ms"], mixed["jitter_pct"], mixed["chars_per_minute"]))
+    check("习惯：退格率 = 退格数 / 字数", mixed["typo_rate"] == 0.0417,
+          str(mixed["typo_rate"]))
+    check("习惯：空格/标点/换行/改错停顿统计正确",
+          mixed["space_pause_ms"] == 170 and mixed["punctuation_pause_ms"] == 270
+          and mixed["newline_pause_ms"] == 470 and mixed["fix_delay_ms"] == 150,
+          "%s / %s / %s / %s" % (mixed["space_pause_ms"], mixed["punctuation_pause_ms"],
+                                 mixed["newline_pause_ms"], mixed["fix_delay_ms"]))
+    check("习惯：采样时长 = 首尾按键时间差", mixed["sample_seconds"] == 7.73,
+          str(mixed["sample_seconds"]))
+
+    mixed_suggest = suggest(mixed, {}, {})
+    check("习惯：suggest 全套映射（抖动 clamp 到 80%）",
+          mixed_suggest == {"timing.char_delay_ms": 120,
+                            "timing.char_delay_jitter_pct": 80,
+                            "timing.burst_mode": True,
+                            "timing.burst_fast_ms": 60,
+                            "timing.burst_slow_ms": 290,
+                            "timing.space_pause_ms": 170,
+                            "timing.punctuation_pause_ms": 270,
+                            "timing.newline_pause_ms": 470,
+                            "human.typo_rate": 0.0417,
+                            "human.fix_delay_min_ms": 90,
+                            "human.fix_delay_max_ms": 270},
+          str(mixed_suggest))
+    check("习惯：suggest 不返回换位/连击/晚发现/快慢长度等其它参数",
+          not [key for key in mixed_suggest
+               if any(word in key for word in ("transpose", "double", "late_notice",
+                                               "burst_len", "neighbor", "skip_fix"))])
+
+    # ---------------------------------------------------------- 极端值与缺省
+    extreme_low = suggest({"median_interval_ms": 1, "jitter_pct": 1, "p10_interval_ms": 1,
+                           "p90_interval_ms": 5000, "sample_chars": 100,
+                           "backspace_count": 0}, {}, {})
+    check("习惯：极端参数（1ms / 0 退格）clamp 正确",
+          extreme_low == {"timing.char_delay_ms": 20,
+                          "timing.char_delay_jitter_pct": 5,
+                          "timing.burst_mode": True,
+                          "timing.burst_fast_ms": 15,
+                          "timing.burst_slow_ms": 500,
+                          "human.typo_rate": 0.0},
+          str(extreme_low))
+    extreme_high = suggest({"median_interval_ms": 5000, "jitter_pct": 500,
+                            "p10_interval_ms": 5000, "p90_interval_ms": 9000,
+                            "sample_chars": 10, "backspace_count": 5, "fix_delay_ms": 0,
+                            "space_pause_ms": -80, "punctuation_pause_ms": 9999,
+                            "newline_pause_ms": 9999}, {}, {})
+    check("习惯：极端参数（5000ms / 样本不足）clamp 且缺省不返回",
+          extreme_high == {"timing.char_delay_ms": 220,
+                           "timing.char_delay_jitter_pct": 80,
+                           "timing.burst_mode": True,
+                           "timing.burst_fast_ms": 220,
+                           "timing.burst_slow_ms": 500,
+                           "timing.space_pause_ms": 0,
+                           "timing.punctuation_pause_ms": 600,
+                           "timing.newline_pause_ms": 1500,
+                           "human.fix_delay_min_ms": 60,
+                           "human.fix_delay_max_ms": 140},
+          str(extreme_high))
+
+    # ---------------------------------------------------------- 过滤 / 样本不足 / 重置
+    tricky = [0.0, 100.0, 105.0, 200.0, 2105.0, 2405.0, 2413.0]
+    filtered = HabitProfiler()
+    for stamp in tricky:
+        filtered.record(stamp, char="a")
+    check("习惯：只保留 10~3000ms 的间隔",
+          filtered.char_count == 7 and filtered.interval_count == 4
+          and filtered.intervals == [100.0, 95.0, 1905.0, 300.0],
+          str(filtered.intervals))
+    filtered.reset()
+    check("习惯：reset 清空采集", filtered.char_count == 0 and filtered.interval_count == 0
+          and filtered.events == [])
+
+    caught = ""
+    try:
+        analyze_events([{"t": index * 100.0, "kind": "char"} for index in range(20)])
+    except HabitError:
+        caught = "HabitError"
+    except Exception as exc:
+        caught = type(exc).__name__
+    check("习惯：有效间隔不足 %d 个时抛 HabitError" % MIN_INTERVALS,
+          caught == "HabitError", caught)
+    check("习惯：HabitError 是 ValueError 的子类", issubclass(HabitError, ValueError))
+    enough = analyze_events([{"t": index * 100.0, "kind": "char"} for index in range(21)])
+    check("习惯：刚好 %d 个间隔即可分析" % MIN_INTERVALS,
+          enough["median_interval_ms"] == 100 and enough["chars_per_minute"] == 600,
+          "%s ms / %s 字每分" % (enough["median_interval_ms"], enough["chars_per_minute"]))
+    with_context = analyze_events(mixed_events, timing={"char_delay_ms": 55},
+                                  human={"typo_rate": 0.02})
+    check("习惯：analyze 接受 timing/human 上下文且结果不变", with_context == mixed)
+
+
 def test_engine_full_run() -> None:
     text = "def add(a, b):\n    return a + b\n\n\nprint(add(1, 2))\n"
     cfg = make_config(text, human={"typo_rate": 0.35, "transpose_rate": 0.05,
@@ -256,7 +468,7 @@ def test_hotkey_matching() -> None:
     from autotyper.hotkeys import KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, GlobalHotkeys
     from autotyper.win32_input import name_to_vk
     captured = []
-    hotkeys = GlobalHotkeys({"start": "down", "stop": "up", "panic": "f12"},
+    hotkeys = GlobalHotkeys({"start": "down", "stop": "up", "panic": "f12", "reset": "f9"},
                             swallow=True, on_action=captured.append)
     check("热键：键名映射正确", name_to_vk("down") == 0x28 and name_to_vk("f12") == 0x7B,
           "%s %s" % (name_to_vk("down"), name_to_vk("f12")))
@@ -284,6 +496,15 @@ def test_hotkey_matching() -> None:
     while not hotkeys._queue.empty():
         queued_injected.append(hotkeys._queue.get_nowait())
     check("热键：忽略自己注入的按键", queued_injected == [], str(queued_injected))
+
+    # 重置进度键（默认不绑定，用户自己设置后应能触发 reset）
+    send(0x78, WM_KEYDOWN)      # F9
+    send(0x78, WM_KEYUP)
+    sent_reset = []
+    while not hotkeys._queue.empty():
+        sent_reset.append(hotkeys._queue.get_nowait())
+    check("热键：重置进度键 F9 触发 reset", sent_reset == ["reset"], str(sent_reset))
+    check("热键：启动日志描述里带重置进度", "重置进度" in hotkeys.describe(), hotkeys.describe())
 
 
 def test_hook_install() -> None:
@@ -621,6 +842,7 @@ def run_all(with_windows: bool = False) -> int:
     test_segments()
     test_indent()
     test_humanizer()
+    test_habits_calibration()
     test_engine_full_run()
     test_engine_stop_and_resume()
     test_engine_line_mode()

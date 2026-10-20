@@ -94,9 +94,10 @@ class GlobalHotkeys:
         return self._labels.get(action, "（未设置）")
 
     def describe(self) -> str:
-        names = {"start": "开始/继续", "stop": "停止", "panic": "紧急停止"}
+        names = {"start": "开始/继续", "stop": "停止", "panic": "紧急停止",
+                 "reset": "重置进度"}
         parts = ["%s=%s" % (names[a], self._labels[a])
-                 for a in ("start", "stop", "panic") if a in self._labels]
+                 for a in ("start", "stop", "panic", "reset") if a in self._labels]
         return "  ".join(parts) if parts else "（未绑定热键）"
 
     # ---------------- 演示模式 ----------------

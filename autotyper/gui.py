@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+from . import habits
 from . import paths
 from .config import DEFAULTS
 from .win32_input import name_to_vk, vk_to_label
@@ -29,7 +31,27 @@ PERCENT_KEYS = {
     "human.typo_rate", "human.transpose_rate", "human.double_char_rate",
     "human.late_notice_rate", "human.skip_fix_rate",
 }
-ACTION_NAMES = {"start": "开始 / 继续", "stop": "停止", "panic": "紧急停止"}
+ACTION_NAMES = {"start": "开始 / 继续", "stop": "停止", "panic": "紧急停止",
+                "reset": "重置进度"}
+
+# ③ 页“我的打字习惯”状态行文案 + 校准确认框里“当前值 → 建议值”的展示顺序
+HABIT_STATUS_UNCALIBRATED = "还没校准：点右边按钮，照示例正常打一遍，就会把你的真实速度自动套用进来"
+# 改键时这些“纯修饰键”按下去不算一次有效的改键，继续等真正的键
+CAPTURE_MODIFIER_KEYSYMS = ("Shift_L", "Shift_R", "Control_L", "Control_R",
+                            "Alt_L", "Alt_R", "Super_L", "Super_R", "Caps_Lock", "Num_Lock")
+HABIT_PARAM_LABELS = (
+    ("timing.char_delay_ms", "每字间隔", "ms"),
+    ("timing.char_delay_jitter_pct", "间隔抖动", "%"),
+    ("timing.burst_mode", "快慢交替", ""),
+    ("timing.burst_fast_ms", "快时每字", "ms"),
+    ("timing.burst_slow_ms", "慢时每字", "ms"),
+    ("timing.space_pause_ms", "空格后停顿", "ms"),
+    ("timing.punctuation_pause_ms", "标点后停顿", "ms"),
+    ("timing.newline_pause_ms", "换行后停顿", "ms"),
+    ("human.typo_rate", "打错字频率", "%"),
+    ("human.fix_delay_min_ms", "改错前最短停顿", "ms"),
+    ("human.fix_delay_max_ms", "改错前最长停顿", "ms"),
+)
 
 
 def pretty_key(name: str) -> str:
@@ -100,6 +122,9 @@ class SettingsWindow:
         self._demo_window = None
         self._demo_stop = threading.Event()
         self._demo_after = None
+        self._habit_window = None
+        self._habit_profiler = None
+        self._habit_input = None
         self._selected_index = 0
         self.steps = [dict(item) for item in self.cfg.steps()]
         if not self.steps:
@@ -146,9 +171,20 @@ class SettingsWindow:
         self.hint_var = tk.StringVar(value="")
         ttk.Label(status, textvariable=self.hint_var, style="CardBad.TLabel").pack(anchor="w", pady=(2, 0))
         self.hotkey_live_var = tk.StringVar(value="热键未生效")
-        ttk.Label(status, textvariable=self.hotkey_live_var, style="CardGood.TLabel").pack(anchor="w", pady=(2, 0))
+        self.hotkey_live_label = ttk.Label(status, textvariable=self.hotkey_live_var,
+                                           style="CardGood.TLabel", justify="left", wraplength=760)
+        self.hotkey_live_label.pack(anchor="w", pady=(2, 0))
         self.saved_var = tk.StringVar(value="改动会自动保存")
         ttk.Label(status, textvariable=self.saved_var, style="CardMuted.TLabel").pack(anchor="w", pady=(2, 0))
+
+        def _wrap_hotkey_line(event):
+            # 热键多了以后这一行会变长：窗口变窄时自动折行，别被裁掉
+            try:
+                self.hotkey_live_label.configure(wraplength=max(320, int(event.width) - 24))
+            except Exception:
+                pass
+
+        status.bind("<Configure>", _wrap_hotkey_line)
 
         bar = ttk.Frame(outer)
         bar.pack(side="bottom", fill="x", pady=(8, 0))
@@ -208,6 +244,10 @@ class SettingsWindow:
         ttk.Button(buttons, text="⬇ 下移", command=lambda: self.move_step(1)).pack(side="left", padx=4)
         ttk.Button(buttons, text="🗑 删除（立即生效）", command=self.delete_step).pack(side="left", padx=4)
         ttk.Button(buttons, text="📄 从文件导入", command=self.import_steps_from_file).pack(side="right")
+        self.load_demo_button = ttk.Button(buttons, text="📂 载入演示…", command=self.load_demo_file)
+        self.load_demo_button.pack(side="right", padx=(4, 0))
+        self.save_demo_button = ttk.Button(buttons, text="💾 保存演示…", command=self.save_demo_file)
+        self.save_demo_button.pack(side="right", padx=(4, 0))
 
         bottom = ttk.Frame(self.steps_paned)
         bottom.columnconfigure(0, weight=1)
@@ -288,8 +328,10 @@ class SettingsWindow:
         self._spin(tab, 3, "换行后停顿（毫秒）", "timing.newline_pause_ms", 0, 3000, 20)
         self._spin(tab, 4, "标点后停顿（毫秒）", "timing.punctuation_pause_ms", 0, 3000, 20)
         self._check(tab, 5, "快慢交替（更像真人）", "timing.burst_mode")
-        ttk.Label(tab, text="提示：间隔 50~80 毫秒最像真人；太快会被编辑器当粘贴。",
-                  foreground=MUTED).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Label(tab, text=("提示：间隔 50~80 毫秒最像真人；太快会被编辑器当粘贴。\n"
+                             "想让速度和你本人一致 → 去 ③ 页点「采集我的打字习惯」。"),
+                  foreground=MUTED, justify="left").grid(
+                      row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
     # ---------------- ③ 像不像真人 ----------------
     def _build_human_tab(self, notebook) -> None:
@@ -304,6 +346,21 @@ class SettingsWindow:
         ttk.Label(tab, text="错字率 2%~4% 最自然；0 就是完全不打错。",
                   foreground=MUTED).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
+        habits_box = ttk.LabelFrame(tab, text="我的打字习惯（自动适配速度快慢）", padding=8)
+        habits_box.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.habits_status_var = tk.StringVar(value="")
+        ttk.Label(habits_box, textvariable=self.habits_status_var, justify="left",
+                  wraplength=740).pack(anchor="w")
+        habits_buttons = ttk.Frame(habits_box)
+        habits_buttons.pack(fill="x", pady=(6, 0))
+        ttk.Button(habits_buttons, text="采集我的打字习惯…",
+                   command=self._open_habits).pack(side="left")
+        ttk.Button(habits_buttons, text="清除校准记录",
+                   command=self._clear_habits).pack(side="left", padx=6)
+        ttk.Label(habits_box, text="只记录按键间隔，不保存你打的内容。",
+                  foreground=MUTED).pack(anchor="w", pady=(4, 0))
+        self.refresh_habits_state()
+
     # ---------------- ④ 控制按键 ----------------
     def _build_keys_tab(self, notebook) -> None:
         tab = ttk.Frame(notebook, padding=12)
@@ -311,7 +368,8 @@ class SettingsWindow:
         ttk.Label(tab, text="像游戏改键一样：点一下“按下新键”，然后直接按你想用的键。",
                   foreground=MUTED).grid(row=0, column=0, columnspan=2, sticky="w")
         self._key_entries = {}
-        rows = (("start", "开始 / 继续（↓）"), ("stop", "停止（↑）"), ("panic", "紧急停止（F12）"))
+        rows = (("start", "开始 / 继续（↓）"), ("stop", "停止（↑）"),
+                ("panic", "紧急停止（F12）"), ("reset", "重置进度（从头开始）"))
         for index, (action, label) in enumerate(rows, start=1):
             row = ttk.Frame(tab)
             row.grid(row=index, column=0, columnspan=2, sticky="ew", pady=3)
@@ -320,24 +378,25 @@ class SettingsWindow:
             self._binding_vars[action] = var
             entry = ttk.Entry(row, textvariable=var, width=12, justify="center")
             entry.pack(side="left", padx=6)
-            entry.bind("<KeyPress>", lambda event, act=action: self._on_binding_key(event, act))
             self._key_entries[action] = entry
             ttk.Button(row, text="按下新键",
                        command=lambda act=action: self._begin_capture(act)).pack(side="left")
+        ttk.Label(tab, text="「重置进度」键默认不绑定（防止误按），点「按下新键」就能设置。",
+                  foreground=MUTED).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(tab, text="恢复默认按键", command=self.reset_keys).grid(
-            row=5, column=0, sticky="w", pady=(8, 0))
-        self._combo(tab, 6, "↓/↑ 要不要拦下来", "hotkeys.swallow_mode",
+            row=6, column=0, sticky="w", pady=(6, 0))
+        self._combo(tab, 7, "↓/↑ 要不要拦下来", "hotkeys.swallow_mode",
                     [("target", "只在我下面指定的程序里拦（推荐）"),
                      ("always", "所有程序里都拦"),
                      ("off", "不拦（哪都能用 ↓/↑）")],
                     "拦下来 = 目标程序收不到这几个键")
-        self._entry(tab, 7, "目标程序的进程名（如 pycharm64.exe）", "hotkeys.target_process")
+        self._entry(tab, 8, "目标程序的进程名（如 pycharm64.exe）", "hotkeys.target_process")
         ttk.Button(tab, text="读取当前前台程序", command=self._grab_foreground_process).grid(
-            row=8, column=1, sticky="w")
-        self._spin(tab, 9, "按一次最多打多少字（0=不限）", "safety.max_chars_per_trigger", 0, 1000000, 100)
+            row=9, column=1, sticky="w")
+        self._spin(tab, 10, "按一次最多打多少字（0=不限）", "safety.max_chars_per_trigger", 0, 1000000, 100)
 
         lock_box = ttk.LabelFrame(tab, text="演示模式（防止演示时误碰键盘）", padding=8)
-        lock_box.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        lock_box.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         lock_row = ttk.Frame(lock_box)
         lock_row.pack(fill="x")
         self.lock_var = tk.BooleanVar(value=False)
@@ -594,6 +653,104 @@ class SettingsWindow:
         self.apply_steps_now()
         self.hint_var.set("已从文件导入 %d 层" % added)
 
+    # ------------------------------------------------------------ 保存/载入本地演示
+    def _demo_payload(self) -> dict:
+        """把当前楼层整理成可存盘的演示文件内容（只含楼层，不含速度/拟人设置）。"""
+        self._apply_editor()
+        steps = [{"name": str(item.get("name") or ""), "text": str(item.get("text") or "")}
+                 for item in self.steps]
+        return {"app": "打字助手", "kind": "autotyper-demo", "version": 1,
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "steps": steps}
+
+    def _write_demo_file(self, path: str) -> int:
+        """把当前演示写到本地文件（先写临时文件再替换，避免写一半坏掉）。"""
+        payload = self._demo_payload()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+        return len(payload["steps"])
+
+    def _read_demo_file(self, path: str) -> list:
+        """读本地演示文件，返回干净的楼层列表；格式不对时抛 ValueError。"""
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            steps = data.get("steps")
+        elif isinstance(data, list):
+            steps = data
+        else:
+            raise ValueError("不是打字助手的演示文件")
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("文件里没有找到楼层")
+        result = []
+        for index, item in enumerate(steps):
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip() or ("第 %d 层" % (index + 1))
+                text = str(item.get("text") or "")
+            elif isinstance(item, str):
+                name = "第 %d 层" % (index + 1)
+                text = item
+            else:
+                continue
+            result.append({"name": name, "text": text})
+        if not result:
+            raise ValueError("文件里没有可用的楼层")
+        return result[:500]
+
+    def _load_demo_steps(self, steps: list) -> None:
+        """用读出来的楼层替换当前楼层，并立即生效。"""
+        self.steps = [dict(item) for item in steps]
+        self._selected_index = 0
+        self.refresh_steps_view(preferred=0)
+        self.apply_steps_now()
+
+    def save_demo_file(self) -> None:
+        """① 页“保存演示…”：把当前楼层存成本地 .demo.json 文件。"""
+        self._apply_editor()
+        default_name = "演示_%s.demo.json" % time.strftime("%Y-%m-%d_%H%M")
+        try:
+            path = filedialog.asksaveasfilename(
+                parent=self.root, title="保存演示到本地", initialdir=paths.SCRIPTS_DIR,
+                initialfile=default_name, defaultextension=".demo.json",
+                filetypes=[("打字助手演示文件", "*.demo.json"), ("JSON 文件", "*.json"),
+                           ("所有文件", "*.*")])
+        except Exception:
+            path = ""
+        if not path:
+            return
+        try:
+            count = self._write_demo_file(path)
+        except Exception as exc:
+            messagebox.showerror("保存失败", "%s\n\n%s" % (os.path.basename(path), exc))
+            return
+        self.hint_var.set("已保存演示：%d 层 → %s" % (count, os.path.basename(path)))
+        self.saved_var.set("已保存演示 " + time.strftime("%H:%M:%S"))
+
+    def load_demo_file(self) -> None:
+        """① 页“载入演示…”：选择之前保存的本地演示文件并替换当前楼层。"""
+        try:
+            if not messagebox.askyesno("载入本地演示",
+                                       "载入会替换当前 %d 层楼层内容（速度/拟人设置不变）。\n确定吗？"
+                                       % len(self.steps)):
+                return
+            path = filedialog.askopenfilename(
+                parent=self.root, title="载入本地演示", initialdir=paths.SCRIPTS_DIR,
+                filetypes=[("打字助手演示文件", "*.demo.json"), ("JSON 文件", "*.json"),
+                           ("所有文件", "*.*")])
+        except Exception:
+            path = ""
+        if not path:
+            return
+        try:
+            steps = self._read_demo_file(path)
+        except Exception as exc:
+            messagebox.showerror("载入失败", "%s\n\n%s" % (os.path.basename(path), exc))
+            return
+        self._load_demo_steps(steps)
+        self.hint_var.set("已载入演示：%d 层 → %s" % (len(self.steps), os.path.basename(path)))
+
     def _insert_tab(self, _event=None):
         self.step_text.insert("insert", "    ")
         return "break"
@@ -696,43 +853,95 @@ class SettingsWindow:
             pass
 
     # ------------------------------------------------------------ 改键
-    def _on_binding_key(self, event, action):
-        if self._capture_action != action:
-            return None
-        self._finish_capture(event.keysym)
-        return "break"
-
     def _begin_capture(self, action: str) -> None:
+        """开始改键：之后按下的第一个键会被捕获（焦点不在输入框上也能用）。"""
+        if action not in self._binding_vars:
+            return
+        self._cancel_capture_ui()
         self._capture_action = action
-        entry = self._key_entries.get(action)
-        if entry is not None:
-            entry.configure(foreground="#c00")
+        for name, item in self._key_entries.items():
+            try:
+                item.configure(foreground=BAD if name == action else INK)
+            except Exception:
+                pass
         self.hint_var.set("请直接按下你想用的键……（Esc 取消）")
+        try:
+            # 关键：在窗口级监听按键（焦点在按钮上也能收到）。
+            # 旧版只把 <KeyPress> 绑在输入框上，点“按下新键”后焦点在按钮上，永远收不到按键。
+            self.root.bind("<KeyPress>", self._on_capture_key)
+        except Exception:
+            pass
+        try:
+            self.root.focus_set()
+        except Exception:
+            pass
+
+    def _on_capture_key(self, event):
+        """改键期间窗口收到的任意按键。"""
+        keysym = str(getattr(event, "keysym", "") or "")
+        if keysym in CAPTURE_MODIFIER_KEYSYMS:
+            # 用户先按到 Shift/Ctrl 之类时不结束捕获，继续等他按真正的键
+            self.hint_var.set("按 Shift/Ctrl/Alt 这类键不算，请按你真正想用的那个键……（Esc 取消）")
+            return "break"
+        self._finish_capture(keysym)
+        return "break"
 
     def _finish_capture(self, keysym: str) -> None:
         action = self._capture_action
         self._capture_action = None
-        entry = self._key_entries.get(action) if action else None
-        if entry is not None:
-            entry.configure(foreground=INK)
+        try:
+            self.root.unbind("<KeyPress>")
+        except Exception:
+            pass
+        self._restore_capture_ui()
         if not action:
             return
-        if keysym in ("Escape",):
-            self.hint_var.set("已取消")
+        if keysym in ("Escape", "Esc"):
+            self.hint_var.set("已取消（没有改键）")
             return
         name = self._keysym_to_name(keysym)
+        entry = self._key_entries.get(action)
+        if entry is not None:
+            try:
+                entry.focus_set()
+            except Exception:
+                pass
         if not name:
-            self.hint_var.set("这个键不能单独用，换一个（比如 F8、方向键、字母）")
+            self.hint_var.set("这个键不能单独用，换一个（比如 F8、方向键、字母、符号）")
             return
         self._set_binding(action, name)
+
+    def _cancel_capture_ui(self) -> None:
+        """清掉上一次没结束的改键状态（重新点“按下新键”时调用）。"""
+        if not self._capture_action:
+            return
+        self._capture_action = None
+        try:
+            self.root.unbind("<KeyPress>")
+        except Exception:
+            pass
+        self._restore_capture_ui()
+
+    def _restore_capture_ui(self) -> None:
+        for item in self._key_entries.values():
+            try:
+                item.configure(foreground=INK)
+            except Exception:
+                pass
 
     @staticmethod
     def _keysym_to_name(keysym: str) -> str:
         mapping = {"Down": "down", "Up": "up", "Left": "left", "Right": "right",
-                   "Return": "enter", "space": "space", "Tab": "tab",
-                   "BackSpace": "backspace", "Control_L": "", "Control_R": "",
-                   "Shift_L": "", "Shift_R": "", "Alt_L": "", "Alt_R": "",
-                   "Super_L": "", "Super_R": "", "Escape": "esc"}
+                   "Return": "enter", "KP_Enter": "enter", "space": "space", "Tab": "tab",
+                   "BackSpace": "backspace", "Home": "home", "End": "end",
+                   "Prior": "pageup", "Next": "pagedown", "Insert": "insert",
+                   "Delete": "delete", "Caps_Lock": "capslock",
+                   "comma": ",", "period": ".", "slash": "/", "semicolon": ";",
+                   "apostrophe": "'", "bracketleft": "[", "bracketright": "]",
+                   "backslash": "\\", "minus": "-", "equal": "=",
+                   "Control_L": "", "Control_R": "", "Shift_L": "", "Shift_R": "",
+                   "Alt_L": "", "Alt_R": "", "Super_L": "", "Super_R": "",
+                   "Menu": "", "Escape": "esc"}
         if keysym in mapping:
             return mapping[keysym]
         if keysym.startswith("F") and keysym[1:].isdigit():
@@ -757,16 +966,20 @@ class SettingsWindow:
             self.hint_var.set("已把「%s」改成 %s（立刻生效，旧按键已解绑）"
                               % (ACTION_NAMES.get(action, action), pretty_key(key)))
         try:
+            # 先把界面上的按键写回配置，再让 app 用新配置重启热键；
+            # 少这一步会出现“界面显示新键、钩子却还在监听旧键”的假生效。
+            self.collect_hotkeys()
             self.app.apply_hotkeys_live()
         except Exception:
             pass
 
     def reset_keys(self) -> None:
-        defaults = {"start": "down", "stop": "up", "panic": "f12"}
+        defaults = {"start": "down", "stop": "up", "panic": "f12", "reset": ""}
         for action, var in self._binding_vars.items():
             var.set(defaults.get(action, ""))
         self.hint_var.set("已恢复默认按键（立刻生效）")
         try:
+            self.collect_hotkeys()
             self.app.apply_hotkeys_live()
         except Exception:
             pass
@@ -804,6 +1017,339 @@ class SettingsWindow:
         except Exception:
             pass
 
+    # ------------------------------------------------------------ 打字习惯校准
+    def refresh_habits_state(self) -> None:
+        """刷新 ③ 页“我的打字习惯”状态行：未校准 / 已校准摘要。"""
+        var = getattr(self, "habits_status_var", None)
+        if var is None:
+            return
+        try:
+            calibrated_at = str(self.cfg.get("habits.calibrated_at", "") or "").strip()
+            if not calibrated_at:
+                var.set(HABIT_STATUS_UNCALIBRATED)
+                return
+            median = int(round(float(self.cfg.get("habits.median_interval_ms", 0) or 0)))
+            cpm = int(round(float(self.cfg.get("habits.chars_per_minute", 0) or 0)))
+            jitter = int(round(float(self.cfg.get("habits.jitter_pct", 0) or 0)))
+            var.set("已校准 %s · 中位间隔 %d ms · 约 %d 字/分 · 抖动 %d%%"
+                    % (calibrated_at, median, cpm, jitter))
+        except Exception:
+            pass
+
+    def _open_habits(self) -> None:
+        """打开“采集我的打字习惯”对话框（用户主动照示例打一遍）。"""
+        if self._habit_window is not None:
+            try:
+                self._habit_window.deiconify()
+                self._habit_window.lift()
+            except Exception:
+                pass
+            return
+        try:
+            window = tk.Toplevel(self.root)
+        except Exception:
+            return
+        window.title("采集我的打字习惯")
+        window.configure(bg=BG)
+        window.transient(self.root)
+        try:
+            window.minsize(680, 430)
+        except Exception:
+            pass
+        self._habit_window = window
+        self._habit_profiler = habits.HabitProfiler()
+        sample_text = str(habits.SAMPLE_TEXT or "")
+
+        outer = ttk.Frame(window, padding=12)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, justify="left", wraplength=640, foreground=MUTED,
+                  text=("照下面这段示例，用你平时的方式正常打一遍（打错、退格都没关系）。\n"
+                        "打 40 个字以上就能算出习惯；打到 80 个字左右更准。")).pack(anchor="w")
+
+        sample_holder = ttk.Frame(outer, style="Card.TFrame")
+        sample_holder.pack(fill="x", pady=(6, 8))
+        sample = tk.Text(sample_holder, height=7, wrap="word", font=("Consolas", 11),
+                         bg="#fbfcfe", relief="flat", fg=INK)
+        sample.insert("1.0", sample_text)
+        sample.configure(state="disabled")
+        sample.pack(fill="x", padx=6, pady=6)
+
+        ttk.Label(outer, text="开始在这里打（真的按键才会被记录）：",
+                  foreground=MUTED).pack(anchor="w")
+        input_holder = ttk.Frame(outer, style="Card.TFrame")
+        input_holder.pack(fill="x", pady=(4, 0))
+        self._habit_input = tk.Text(input_holder, height=6, wrap="word", undo=True,
+                                    font=("Consolas", 11), bg="#ffffff", relief="flat",
+                                    insertbackground=INK)
+        input_scroll = ttk.Scrollbar(input_holder, orient="vertical",
+                                     command=self._habit_input.yview)
+        self._habit_input.configure(yscrollcommand=input_scroll.set)
+        self._habit_input.pack(side="left", fill="both", expand=True)
+        input_scroll.pack(side="right", fill="y")
+        self._habit_input.bind("<KeyPress>", self._on_habit_key)
+
+        live = ttk.Frame(outer)
+        live.pack(fill="x", pady=(8, 0))
+        self._habit_status_var = tk.StringVar(value="")
+        ttk.Label(live, textvariable=self._habit_status_var, foreground=INK).pack(anchor="w")
+        self._habit_progress_var = tk.IntVar(value=0)
+        self._habit_progress = ttk.Progressbar(live, maximum=max(1, len(sample_text)),
+                                               variable=self._habit_progress_var)
+        self._habit_progress.pack(fill="x", pady=(4, 0))
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="重新开始", command=self._reset_habits).pack(side="left")
+        ttk.Button(buttons, text="取消", command=self._close_habits).pack(side="right")
+        ttk.Button(buttons, text="完成并套用", style="Accent.TButton",
+                   command=self._finish_habits).pack(side="right", padx=6)
+        ttk.Label(outer, text="只记录按键之间的间隔，不会保存你打的内容。",
+                  foreground=MUTED).pack(anchor="w", pady=(8, 0))
+
+        window.protocol("WM_DELETE_WINDOW", self._close_habits)
+        self._refresh_habit_live()
+        try:
+            self._habit_input.focus_set()
+        except Exception:
+            pass
+
+    def _on_habit_key(self, event):
+        """把对话框里的每次按键交给 HabitProfiler（只记时间/类别，不存内容）。"""
+        profiler = self._habit_profiler
+        if profiler is not None:
+            try:
+                profiler.record(event.time, event.char or "", event.keysym or "")
+            except Exception:
+                pass
+            self._refresh_habit_live()
+        return None
+
+    def _refresh_habit_live(self) -> None:
+        """实时刷新“已录入 N 字 · 有效间隔 M 个 · 中位间隔 X ms · 约 Y 字/分”。"""
+        profiler = self._habit_profiler
+        status_var = getattr(self, "_habit_status_var", None)
+        if profiler is None or status_var is None:
+            return
+        try:
+            chars = int(profiler.char_count)
+            valid = int(profiler.interval_count)
+            intervals = [float(item) for item in list(profiler.intervals or [])]
+        except Exception:
+            chars, valid, intervals = 0, 0, []
+        median = 0.0
+        if intervals:
+            ordered = sorted(intervals)
+            middle = len(ordered) // 2
+            if len(ordered) % 2:
+                median = ordered[middle]
+            else:
+                median = (ordered[middle - 1] + ordered[middle]) / 2.0
+        try:
+            if median > 0:
+                status_var.set("已录入 %d 字 · 有效间隔 %d 个 · 中位间隔 %d ms · 约 %d 字/分"
+                               % (chars, valid, int(round(median)), int(round(60000.0 / median))))
+            else:
+                status_var.set("已录入 %d 字 · 有效间隔 %d 个 · 中位间隔 — ms · 约 — 字/分"
+                               % (chars, valid))
+            progress = getattr(self, "_habit_progress_var", None)
+            if progress is not None:
+                limit = max(1, len(str(habits.SAMPLE_TEXT or "")))
+                progress.set(min(chars, limit))
+        except Exception:
+            pass
+
+    def _reset_habits(self) -> None:
+        """重新开始：清空已经采集的按键。"""
+        try:
+            if self._habit_profiler is not None:
+                self._habit_profiler.reset()
+        except Exception:
+            pass
+        try:
+            if self._habit_input is not None:
+                self._habit_input.delete("1.0", "end")
+                self._habit_input.focus_set()
+        except Exception:
+            pass
+        self._refresh_habit_live()
+
+    def _close_habits(self) -> None:
+        """关闭采集对话框（等同取消，不套用任何参数）。"""
+        window = self._habit_window
+        self._habit_window = None
+        self._habit_profiler = None
+        self._habit_input = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+    def _finish_habits(self) -> None:
+        """点“完成并套用”：先分析，再让用户确认“当前值 → 建议值”。"""
+        profiler = self._habit_profiler
+        if profiler is None:
+            return
+        try:
+            profile = profiler.analyze()
+        except habits.HabitError as exc:
+            messagebox.showinfo("再多打一些", "样本还不够：请在示例下面正常多打一些字"
+                                "（至少 40 个，最好 80 个以上），打错、退格都没关系。\n%s" % exc)
+            return
+        except Exception as exc:
+            messagebox.showinfo("这次没算出来", "采集数据时出了点问题：%s\n可以点「重新开始」再来一遍。" % exc)
+            return
+        try:
+            suggestions = habits.suggest(profile, self.cfg.section("timing"),
+                                         self.cfg.section("human"))
+        except Exception:
+            suggestions = {}
+        if not suggestions:
+            messagebox.showinfo("再多打一些", "还没采集到足够的按键间隔，再正常打一段试试。")
+            return
+        if not messagebox.askyesno("套用我的打字习惯", self._habit_compare_text(suggestions, profile)):
+            return
+        self._apply_habits_profile(profile)
+        self._close_habits()
+
+    def _habit_compare_text(self, suggestions: dict, profile: dict) -> str:
+        """把“当前值 → 建议值”拼成确认框文字（只列 suggest 真的返回的项）。"""
+        lines: list = []
+        try:
+            summary = habits.summarize(profile)
+        except Exception:
+            summary = ""
+        if summary:
+            lines.extend(["本次采集：" + summary, ""])
+        lines.append("确认把下面这些参数改成按你打字习惯算出来的值吗？")
+        lines.append("")
+        for dotted, label, _unit in HABIT_PARAM_LABELS:
+            if dotted not in suggestions:
+                continue
+            lines.append("%s：%s → %s" % (label,
+                                          self._habit_value_text(dotted, self.cfg.get(dotted)),
+                                          self._habit_value_text(dotted, suggestions[dotted])))
+        lines.extend(["", "点「是」立即生效并保存；点「否」什么都不改。"])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _habit_value_text(dotted: str, value) -> str:
+        """把参数值按类型/单位格式化成人能看的样子。"""
+        try:
+            if dotted == "human.typo_rate":
+                return "%.2f%%" % (float(value) * 100.0)
+            if isinstance(value, bool):
+                return "开" if value else "关"
+            unit = ""
+            for key, _label, item_unit in HABIT_PARAM_LABELS:
+                if key == dotted:
+                    unit = item_unit
+                    break
+            if isinstance(value, float):
+                return ("%g" % value) + unit
+            return ("%d" % int(round(float(value)))) + unit
+        except Exception:
+            return str(value)
+
+    def _apply_habits_profile(self, profile: dict) -> dict:
+        """把习惯 profile 套用成速度/拟人参数并保存。
+
+        注意：这个方法要能被测试直接调用，所以不弹窗、不调 app.engine；
+        界面上的对应输入框由 _sync_habit_vars 同步。
+        """
+        try:
+            suggestions = habits.suggest(profile or {}, self.cfg.section("timing"),
+                                         self.cfg.section("human"))
+        except Exception:
+            suggestions = {}
+        for dotted, value in suggestions.items():
+            try:
+                self.cfg.set(dotted, value)
+            except Exception:
+                continue
+        self._sync_habit_vars(suggestions)
+
+        def number(key: str) -> float:
+            try:
+                return float((profile or {}).get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # 抖动记“实际套用后的值”（suggest 会 clamp），避免状态行显示 139% 而实际用 80% 的落差
+        applied_jitter = suggestions.get("timing.char_delay_jitter_pct")
+        if applied_jitter is None:
+            applied_jitter = number("jitter_pct")
+        self.cfg.set("habits.calibrated_at", time.strftime("%Y-%m-%d %H:%M"))
+        self.cfg.set("habits.sample_chars", int(round(number("sample_chars"))))
+        self.cfg.set("habits.median_interval_ms", int(round(number("median_interval_ms"))))
+        self.cfg.set("habits.jitter_pct", int(round(float(applied_jitter))))
+        self.cfg.set("habits.chars_per_minute", int(round(number("chars_per_minute"))))
+        self.cfg.set("habits.typo_rate", round(number("typo_rate"), 4))
+        self.cfg.set("habits.applied", dict(suggestions))
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+
+        self.refresh_habits_state()
+        self.refresh_percent_fields()
+        delay = suggestions.get("timing.char_delay_ms")
+        jitter = suggestions.get("timing.char_delay_jitter_pct")
+        parts = []
+        try:
+            if delay is not None:
+                parts.append("每字 %d ms" % int(round(float(delay))))
+            if jitter is not None:
+                parts.append("抖动 %d%%" % int(round(float(jitter))))
+        except (TypeError, ValueError):
+            parts = []
+        if parts:
+            self.hint_var.set("已按你的打字习惯自动套用：" + "、".join(parts) + "（可在 ② ③ 页手动微调）")
+        else:
+            self.hint_var.set("已按你的打字习惯自动套用")
+        try:
+            self.saved_var.set("已保存 " + time.strftime("%H:%M:%S"))
+        except Exception:
+            pass
+        return dict(suggestions)
+
+    def _sync_habit_vars(self, suggestions: dict) -> None:
+        """把建议值同步回界面变量：bool/int/float 按类型，百分比字段显示 ×100。"""
+        for (dotted, kind), var in list(self._vars.items()):
+            if dotted not in suggestions:
+                continue
+            value = suggestions[dotted]
+            try:
+                if kind == "bool":
+                    var.set(bool(value))
+                elif kind == "int":
+                    var.set(int(round(float(value))))
+                elif kind == "float":
+                    shown = float(value) * (100.0 if dotted in PERCENT_KEYS else 1.0)
+                    var.set(round(shown, 3))
+                else:
+                    var.set("" if value is None else str(value))
+            except Exception:
+                continue
+
+    def _clear_habits(self) -> None:
+        """清除校准记录（已经套用的速度参数不会自动还原）。"""
+        if not messagebox.askyesno("清除校准记录",
+                                   "会清掉这次校准记录，重新回到“还没校准”。\n"
+                                   "已经套用到速度/拟人参数上的值不会自动还原"
+                                   "（可在 ② ③ 页手动改）。\n\n确定清除吗？"):
+            return
+        try:
+            defaults = dict(DEFAULTS.get("habits") or {})
+            for key, value in defaults.items():
+                self.cfg.set("habits." + str(key),
+                             dict(value) if isinstance(value, dict) else value)
+            self.cfg.save()
+        except Exception:
+            pass
+        self.refresh_habits_state()
+        self.hint_var.set("已清除校准记录（已套用的速度参数保持不变）")
+
     # ------------------------------------------------------------ 预览/演示
     def show_dry_run(self) -> None:
         try:
@@ -833,6 +1379,7 @@ class SettingsWindow:
         self.collect()
         self.cfg.save()
         self.refresh_steps_view()
+        self.refresh_habits_state()
         self.hint_var.set("已恢复默认设置")
 
     def _open_config_dir(self) -> None:
