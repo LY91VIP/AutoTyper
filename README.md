@@ -5,7 +5,7 @@
 **一层一层、像真人一样把文字打出来的 Windows 桌面工具**
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-1.1.1-2563eb">
+  <img alt="version" src="https://img.shields.io/badge/version-1.1.2-2563eb">
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white">
   <img alt="platform" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?logo=windows&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-22c55e">
@@ -98,6 +98,15 @@
 <a id="changelog"></a>
 
 ## 🆕 更新日志
+
+### v1.1.2（2026-10-20）
+- 修复：「重置进度」热键在设置窗口最前面时按下去没反应——原来只要前台窗口是本程序，
+  四个全局热键会被一律拦掉，而用户往往正是刚在「④ 控制按键」设好键就就地按一下试试；
+- 热键的前台判定改为按动作区分：「重置进度 / 紧急停止」随时可用，也与「目标程序」无关；
+  「开始 / 停止」保持原规则（只在别的程序窗口最前面时响应）；
+- 附带修复：设置窗口在前台时 `F12` 紧急停止也按不动的问题；
+- 「④ 控制按键」补一行焦点说明，避免再踩同一个坑；
+- 自测：离线 117 项 / 含 Windows 项 121 项全部通过。
 
 ### v1.1.1（2026-10-20）
 - 修复：在 PyCharm 等「自动缩进 + 自动配对括号」的编辑器里，多行代码打错后回头修正时，
