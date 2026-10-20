@@ -108,14 +108,15 @@ class AutoIndentPairSink:
 
     def type_text(self, text: str) -> None:
         for ch in text:
-            if ch in self.PAIRS:
+            # 先看光标右边是不是编辑器自动补出来的同一个字符（右括号 / 闭合引号）：
+            # 是的话直接跨过去；引号左右同形，顺序反了会一直补新对，永远消不掉。
+            if self.cursor < len(self.buffer) and self.buffer[self.cursor] == ch:
+                self.cursor += 1
+            elif ch in self.PAIRS:
                 # 编辑器自动补一个右半边，光标停在中间
                 self.buffer.insert(self.cursor, ch)
                 self.cursor += 1
                 self.buffer.insert(self.cursor, self.PAIRS[ch])
-            elif self.cursor < len(self.buffer) and self.buffer[self.cursor] == ch:
-                # 打到自动补出来的右半边 → 直接跨过去
-                self.cursor += 1
             else:
                 self.buffer.insert(self.cursor, ch)
                 self.cursor += 1
@@ -232,6 +233,7 @@ def test_humanizer_multiline_editor() -> None:
     """多行文本 + 自动缩进/自动配对编辑器：错字修正不能把结构打歪。"""
     import random
     original = ("    pad_x = int((x2 - x1) * pad_ratio)\n"
+                "    print(\"ok\", {\"k\": [1, 2]})\n"
                 "    pad_y = int((y2 - y1) * pad_ratio)\n")
     stripped = apply_indent(original, "strip")
     timing = {"char_delay_ms": 1, "burst_mode": False, "newline_pause_ms": 0,
@@ -594,6 +596,103 @@ def test_hotkey_matching() -> None:
     check("热键：启动日志描述里带重置进度", "重置进度" in hotkeys.describe(), hotkeys.describe())
 
 
+def test_engine_reset() -> None:
+    """重置进度：打字过程中调用 stop+reset 必须真正停住并把进度清零。"""
+    text = "".join("line %02d abcdefghij\n" % i for i in range(30))
+    cfg = make_config(text, timing={"char_delay_ms": 5}, human={"typo_rate": 0.0},
+                      source={"resume_last_position": True})
+    sink = DocSink()
+    engine = TypingEngine(cfg, sink=sink)
+    engine.trigger()
+    time.sleep(0.2)
+    typed_before = len(sink.text())
+    engine.stop()
+    engine.reset()
+    status = engine.status()
+    check("重置：打字过程中先停下来", not status["typing"], str(status.get("typing")))
+    check("重置：进度清零回到开头", int(status["position"]) == 0, str(status.get("position")))
+    check("重置：状态为待命", status["state"] == "idle", str(status.get("state")))
+    check("重置：确实已经打了一部分再重置", typed_before > 0, "%d 字符" % typed_before)
+    try:
+        with open(paths.STATE_PATH, "r", encoding="utf-8") as handle:
+            saved = int(json.load(handle).get("position") or 0)
+    except Exception:
+        saved = -1
+    check("重置：进度文件也写成 0", saved == 0, str(saved))
+
+
+def test_hotkey_gate_actions() -> None:
+    """热键门控：重置/紧急停止在设置窗口前台也要能用；开始/停止仍受保护。"""
+    import types
+    import autotyper.app as app_module
+    from autotyper.app import AutoTyperApp
+    from autotyper.hotkeys import KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, GlobalHotkeys
+
+    def make_cfg(**overrides):
+        data = {"hotkeys": {"enabled": True, "only_when_target": False,
+                            "target_process": "pycharm64.exe",
+                            "start_key": "0", "stop_key": "up",
+                            "panic_key": "f12", "reset_key": "f9"}}
+        data["hotkeys"].update(overrides)
+        return Config(data, os.path.join(TMP, "gate-config.json"))
+
+    own = {"pid": os.getpid(), "process": "打字助手.exe", "title": "打字助手 · 设置"}
+    other = {"pid": os.getpid() + 12345, "process": "pycharm64.exe",
+             "title": "demo.py - PyCharm"}
+    original_foreground = app_module.foreground_info
+    try:
+        app_module.foreground_info = lambda: own
+        fake = types.SimpleNamespace(cfg=make_cfg())
+        check("热键门控：设置窗口前台时开始键仍被拦",
+              AutoTyperApp._hotkey_gate(fake, "start") is False)
+        check("热键门控：设置窗口前台时停止键仍被拦",
+              AutoTyperApp._hotkey_gate(fake, "stop") is False)
+        check("热键门控：设置窗口前台时重置进度可用",
+              AutoTyperApp._hotkey_gate(fake, "reset") is True)
+        check("热键门控：设置窗口前台时紧急停止可用",
+              AutoTyperApp._hotkey_gate(fake, "panic") is True)
+
+        app_module.foreground_info = lambda: other
+        check("热键门控：其他程序前台时开始键可用",
+              AutoTyperApp._hotkey_gate(fake, "start") is True)
+        target_only = types.SimpleNamespace(cfg=make_cfg(only_when_target=True))
+        app_module.foreground_info = lambda: dict(other, process="notepad.exe")
+        check("热键门控：只在目标程序时开始键被拦",
+              AutoTyperApp._hotkey_gate(target_only, "start") is False)
+        check("热键门控：重置键不受目标程序限制",
+              AutoTyperApp._hotkey_gate(target_only, "reset") is True)
+        disabled = types.SimpleNamespace(cfg=make_cfg(enabled=False))
+        check("热键门控：热键总开关关闭时重置键也不可用",
+              AutoTyperApp._hotkey_gate(disabled, "reset") is False)
+    finally:
+        app_module.foreground_info = original_foreground
+
+    seen = []
+    def gate(action):
+        seen.append(action)
+        return action == "reset"
+    hk = GlobalHotkeys({"start": "0", "stop": "up", "panic": "f12", "reset": "f9"},
+                       swallow=False, gate=gate, on_action=lambda name: None)
+    def send(vk, message):
+        info = KBDLLHOOKSTRUCT()
+        info.vkCode = vk
+        info.flags = 0
+        return int(hk._callback(0, message, ctypes.addressof(info)))
+    send(0x78, WM_KEYDOWN)
+    send(0x78, WM_KEYUP)
+    queued = []
+    while not hk._queue.empty():
+        queued.append(hk._queue.get_nowait())
+    check("热键门控：gate 能收到动作名", "reset" in seen, str(seen))
+    check("热键门控：重置键动作进入分发队列", queued == ["reset"], str(queued))
+    send(0x30, WM_KEYDOWN)
+    send(0x30, WM_KEYUP)
+    rejected = []
+    while not hk._queue.empty():
+        rejected.append(hk._queue.get_nowait())
+    check("热键门控：gate 拒绝时不触发", rejected == [], str(rejected))
+
+
 def test_hook_install() -> None:
     from autotyper.hotkeys import GlobalHotkeys
     hotkeys = GlobalHotkeys({"start": "down"}, swallow=False, on_action=lambda name: None)
@@ -936,6 +1035,8 @@ def run_all(with_windows: bool = False) -> int:
     test_engine_line_mode()
     test_config_roundtrip()
     test_hotkey_matching()
+    test_hotkey_gate_actions()
+    test_engine_reset()
     test_plain_text()
     test_engine_random_stress()
     test_steps_layout()

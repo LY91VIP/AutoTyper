@@ -92,8 +92,8 @@
 运行自测.bat
 ```
 
-- 离线自测 **117 项**（模拟一个「带退格语义的假编辑器」，逐字符比对最终文本）；
-- 带 Windows 项共 **121 项**（低级键盘钩子、托盘图标、窗口样式、真实 `SendInput` 注入链路等）。
+- 离线自测 **133 项**（模拟一个「带退格语义的假编辑器」，逐字符比对最终文本）；
+- 带 Windows 项共 **137 项**（低级键盘钩子、托盘图标、窗口样式、真实 `SendInput` 注入链路等）。
 
 <a id="changelog"></a>
 
@@ -106,7 +106,7 @@
   「开始 / 停止」保持原规则（只在别的程序窗口最前面时响应）；
 - 附带修复：设置窗口在前台时 `F12` 紧急停止也按不动的问题；
 - 「④ 控制按键」补一行焦点说明，避免再踩同一个坑；
-- 自测：离线 117 项 / 含 Windows 项 121 项全部通过。
+- 自测：补上热键门控与重置流程的回归用例；离线 133 项 / 含 Windows 项 137 项全部通过。
 
 ### v1.1.1（2026-10-20）
 - 修复：在 PyCharm 等「自动缩进 + 自动配对括号」的编辑器里，多行代码打错后回头修正时，
@@ -149,11 +149,11 @@
 
 **不想折腾 Python？** 直接下载打包好的 Windows 版本：
 
-👉 **[Releases · AutoTyper v1.1.1](https://github.com/LY91VIP/AutoTyper/releases)**
+👉 **[Releases · AutoTyper v1.1.2](https://github.com/LY91VIP/AutoTyper/releases)**
 
 | 文件 | 说明 |
 | --- | --- |
-| `AutoTyper_v1.1.1_win64.zip` | Windows 10 / 11 64 位，解压即用，无需安装 Python |
+| `AutoTyper_v1.1.2_win64.zip` | Windows 10 / 11 64 位，解压即用，无需安装 Python |
 
 解压后目录大致是这样：
 
@@ -169,7 +169,7 @@ AutoTyper/
 └─ 使用说明.txt
 ```
 
-> SHA256（v1.1.1）：`2C363E5DE053A679C6E9341CF6F344A47E379B97F07FFB073DECDDC0760D2E5D`
+> SHA256（v1.1.2）：`23615420AE7F3C75C58AE0294338145001C39B96BA9442A0267DB6680885F75E`
 
 <a id="quickstart"></a>
 
